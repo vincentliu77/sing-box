@@ -22,6 +22,7 @@ import (
 	"github.com/sagernet/sing-box/common/sniff"
 	"github.com/sagernet/sing-box/common/warning"
 	C "github.com/sagernet/sing-box/constant"
+	"github.com/sagernet/sing-box/experimental/libbox/platform"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-dns"
@@ -97,9 +98,10 @@ type Router struct {
 	processSearcher                    process.Searcher
 	clashServer                        adapter.ClashServer
 	v2rayServer                        adapter.V2RayServer
+	platformInterface                  platform.Interface
 }
 
-func NewRouter(ctx context.Context, logFactory log.Factory, options option.RouteOptions, dnsOptions option.DNSOptions, inbounds []option.Inbound) (*Router, error) {
+func NewRouter(ctx context.Context, logFactory log.Factory, options option.RouteOptions, dnsOptions option.DNSOptions, inbounds []option.Inbound, platformInterface platform.Interface) (*Router, error) {
 	if options.DefaultInterface != "" {
 		warnDefaultInterfaceOnUnsupportedPlatform.Check()
 	}
@@ -128,6 +130,7 @@ func NewRouter(ctx context.Context, logFactory log.Factory, options option.Route
 		autoDetectInterface:   options.AutoDetectInterface,
 		defaultInterface:      options.DefaultInterface,
 		defaultMark:           options.DefaultMark,
+		platformInterface:     platformInterface,
 	}
 	for i, ruleOptions := range options.Rules {
 		routeRule, err := NewRule(router, router.logger, ruleOptions)
@@ -243,9 +246,9 @@ func NewRouter(ctx context.Context, logFactory log.Factory, options option.Route
 	router.transportMap = transportMap
 	router.transportDomainStrategy = transportDomainStrategy
 
-	needInterfaceMonitor := options.AutoDetectInterface || common.Any(inbounds, func(inbound option.Inbound) bool {
+	needInterfaceMonitor := platformInterface == nil && (options.AutoDetectInterface || common.Any(inbounds, func(inbound option.Inbound) bool {
 		return inbound.HTTPOptions.SetSystemProxy || inbound.MixedOptions.SetSystemProxy || inbound.TunOptions.AutoRoute
-	})
+	}))
 
 	if needInterfaceMonitor {
 		networkMonitor, err := tun.NewNetworkUpdateMonitor(router)
@@ -267,7 +270,7 @@ func NewRouter(ctx context.Context, logFactory log.Factory, options option.Route
 	}
 
 	needFindProcess := hasRule(options.Rules, isProcessRule) || hasDNSRule(dnsOptions.Rules, isProcessDNSRule) || options.FindProcess
-	needPackageManager := C.IsAndroid && (needFindProcess || common.Any(inbounds, func(inbound option.Inbound) bool {
+	needPackageManager := C.IsAndroid && platformInterface == nil && (needFindProcess || common.Any(inbounds, func(inbound option.Inbound) bool {
 		return len(inbound.TunOptions.IncludePackage) > 0 || len(inbound.TunOptions.ExcludePackage) > 0
 	}))
 	if needPackageManager {
@@ -278,16 +281,20 @@ func NewRouter(ctx context.Context, logFactory log.Factory, options option.Route
 		router.packageManager = packageManager
 	}
 	if needFindProcess {
-		searcher, err := process.NewSearcher(process.Config{
-			Logger:         logFactory.NewLogger("router/process"),
-			PackageManager: router.packageManager,
-		})
-		if err != nil {
-			if err != os.ErrInvalid {
-				router.logger.Warn(E.Cause(err, "create process searcher"))
-			}
+		if platformInterface != nil {
+			router.processSearcher = platformInterface
 		} else {
-			router.processSearcher = searcher
+			searcher, err := process.NewSearcher(process.Config{
+				Logger:         logFactory.NewLogger("router/process"),
+				PackageManager: router.packageManager,
+			})
+			if err != nil {
+				if err != os.ErrInvalid {
+					router.logger.Warn(E.Cause(err, "create process searcher"))
+				}
+			} else {
+				router.processSearcher = searcher
+			}
 		}
 	}
 	return router, nil
@@ -383,25 +390,25 @@ func (r *Router) Start() error {
 	if r.needGeoIPDatabase {
 		err := r.prepareGeoIPDatabase()
 		if err != nil {
-			return err
+			return E.Cause(err, "prepare GeoIP database")
 		}
 	}
 	if r.needGeositeDatabase {
 		err := r.prepareGeositeDatabase()
 		if err != nil {
-			return err
+			return E.Cause(err, "prepare Geosite database")
 		}
 	}
-	for _, rule := range r.rules {
+	for i, rule := range r.rules {
 		err := rule.Start()
 		if err != nil {
-			return err
+			return E.Cause(err, "start rule[", i, "]")
 		}
 	}
-	for _, rule := range r.dnsRules {
+	for i, rule := range r.dnsRules {
 		err := rule.Start()
 		if err != nil {
-			return err
+			return E.Cause(err, "start DNS rule[", i, "]")
 		}
 	}
 	if r.needGeositeDatabase {
@@ -427,19 +434,19 @@ func (r *Router) Start() error {
 	if r.interfaceMonitor != nil {
 		err := r.interfaceMonitor.Start()
 		if err != nil {
-			return err
+			return E.Cause(err, "start interface monitor")
 		}
 	}
 	if r.networkMonitor != nil {
 		err := r.networkMonitor.Start()
 		if err != nil {
-			return err
+			return E.Cause(err, "start network monitor")
 		}
 	}
 	if r.packageManager != nil {
 		err := r.packageManager.Start()
 		if err != nil {
-			return err
+			return E.Cause(err, "start package manager")
 		}
 	}
 	return nil
@@ -720,6 +727,21 @@ func (r *Router) AutoDetectInterface() bool {
 	return r.autoDetectInterface
 }
 
+func (r *Router) AutoDetectInterfaceFunc() control.Func {
+	if r.platformInterface != nil {
+		return r.platformInterface.AutoDetectInterfaceControl()
+	} else {
+		return control.BindToInterfaceFunc(r.InterfaceFinder(), func(network string, address string) (interfaceName string, interfaceIndex int) {
+			remoteAddr := M.ParseSocksaddr(address).Addr
+			if C.IsLinux {
+				return r.InterfaceMonitor().DefaultInterfaceName(remoteAddr), -1
+			} else {
+				return "", r.InterfaceMonitor().DefaultInterfaceIndex(remoteAddr)
+			}
+		})
+	}
+}
+
 func (r *Router) DefaultInterface() string {
 	return r.defaultInterface
 }
@@ -832,6 +854,8 @@ func (r *Router) prepareGeoIPDatabase() error {
 		geoPath = "geoip.db"
 		if foundPath, loaded := C.FindPath(geoPath); loaded {
 			geoPath = foundPath
+		} else {
+			geoPath = C.BasePath(geoPath)
 		}
 	}
 	if !rw.FileExists(geoPath) {
@@ -844,7 +868,7 @@ func (r *Router) prepareGeoIPDatabase() error {
 			}
 			r.logger.Error("download geoip database: ", err)
 			os.Remove(geoPath)
-			time.Sleep(10 * time.Second)
+			// time.Sleep(10 * time.Second)
 		}
 		if err != nil {
 			return err
@@ -867,6 +891,8 @@ func (r *Router) prepareGeositeDatabase() error {
 		geoPath = "geosite.db"
 		if foundPath, loaded := C.FindPath(geoPath); loaded {
 			geoPath = foundPath
+		} else {
+			geoPath = C.BasePath(geoPath)
 		}
 	}
 	if !rw.FileExists(geoPath) {
@@ -879,7 +905,7 @@ func (r *Router) prepareGeositeDatabase() error {
 			}
 			r.logger.Error("download geosite database: ", err)
 			os.Remove(geoPath)
-			time.Sleep(10 * time.Second)
+			// time.Sleep(10 * time.Second)
 		}
 		if err != nil {
 			return err
@@ -933,6 +959,7 @@ func (r *Router) downloadGeoIPDatabase(savePath string) error {
 			},
 		},
 	}
+	defer httpClient.CloseIdleConnections()
 	response, err := httpClient.Get(downloadURL)
 	if err != nil {
 		return err
@@ -980,6 +1007,7 @@ func (r *Router) downloadGeositeDatabase(savePath string) error {
 			},
 		},
 	}
+	defer httpClient.CloseIdleConnections()
 	response, err := httpClient.Get(downloadURL)
 	if err != nil {
 		return err

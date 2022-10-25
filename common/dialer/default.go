@@ -71,15 +71,8 @@ func NewDefault(router adapter.Router, options option.DialerOptions) *DefaultDia
 		dialer.Control = control.Append(dialer.Control, bindFunc)
 		listener.Control = control.Append(listener.Control, bindFunc)
 	} else if router.AutoDetectInterface() {
-		const useInterfaceName = C.IsLinux
-		bindFunc := control.BindToInterfaceFunc(router.InterfaceFinder(), func(network string, address string) (interfaceName string, interfaceIndex int) {
-			remoteAddr := M.ParseSocksaddr(address).Addr
-			if C.IsLinux {
-				return router.InterfaceMonitor().DefaultInterfaceName(remoteAddr), -1
-			} else {
-				return "", router.InterfaceMonitor().DefaultInterfaceIndex(remoteAddr)
-			}
-		})
+		println("auto de")
+		bindFunc := router.AutoDetectInterfaceFunc()
 		dialer.Control = control.Append(dialer.Control, bindFunc)
 		listener.Control = control.Append(listener.Control, bindFunc)
 	} else if router.DefaultInterface() != "" {
