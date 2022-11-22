@@ -139,6 +139,7 @@ func (s *ShadowTLS) copyUntilHandshakeFinishedV2(dst net.Conn, src io.Reader, ha
 	const applicationData = 0x17
 	var tlsHdr [5]byte
 	var applicationDataCount int
+	var lastHash []byte
 	for {
 		_, err := io.ReadFull(src, tlsHdr[:])
 		if err != nil {
@@ -152,9 +153,13 @@ func (s *ShadowTLS) copyUntilHandshakeFinishedV2(dst net.Conn, src io.Reader, ha
 				data.Release()
 				return nil, err
 			}
-			if length >= 8 && bytes.Equal(data.To(8), hash.Sum()) {
-				data.Advance(8)
-				return data, nil
+			if hash.HasContent() {
+				hashCode := hash.Sum()
+				if length >= 8 && (bytes.Equal(data.To(8), hashCode) || lastHash != nil && bytes.Equal(data.To(8), lastHash)) {
+					data.Advance(8)
+					return data, nil
+				}
+				lastHash = hashCode
 			}
 			_, err = io.Copy(dst, io.MultiReader(bytes.NewReader(tlsHdr[:]), data))
 			data.Release()

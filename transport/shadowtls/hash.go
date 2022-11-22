@@ -34,19 +34,21 @@ func (c *HashReadConn) Sum() []byte {
 
 type HashWriteConn struct {
 	net.Conn
-	hmac hash.Hash
+	hmac       hash.Hash
+	hasContent bool
 }
 
 func NewHashWriteConn(conn net.Conn, password string) *HashWriteConn {
 	return &HashWriteConn{
-		conn,
-		hmac.New(sha1.New, []byte(password)),
+		Conn: conn,
+		hmac: hmac.New(sha1.New, []byte(password)),
 	}
 }
 
 func (c *HashWriteConn) Write(p []byte) (n int, err error) {
 	if c.hmac != nil {
 		c.hmac.Write(p)
+		c.hasContent = true
 	}
 	return c.Conn.Write(p)
 }
@@ -57,4 +59,8 @@ func (c *HashWriteConn) Sum() []byte {
 
 func (c *HashWriteConn) Fallback() {
 	c.hmac = nil
+}
+
+func (c *HashWriteConn) HasContent() bool {
+	return c.hasContent
 }
