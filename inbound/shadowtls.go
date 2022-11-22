@@ -21,6 +21,7 @@ import (
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 	"github.com/sagernet/sing/common/task"
+	"encoding/hex"
 )
 
 type ShadowTLS struct {
@@ -139,13 +140,13 @@ func (s *ShadowTLS) copyUntilHandshakeFinishedV2(dst net.Conn, src io.Reader, ha
 	const applicationData = 0x17
 	var tlsHdr [5]byte
 	var applicationDataCount int
-	var lastHash []byte
 	for {
 		_, err := io.ReadFull(src, tlsHdr[:])
 		if err != nil {
 			return nil, err
 		}
 		length := binary.BigEndian.Uint16(tlsHdr[3:])
+		println(tlsHdr[0])
 		if tlsHdr[0] == applicationData {
 			data := buf.NewSize(int(length))
 			_, err = data.ReadFullFrom(src, int(length))
@@ -153,13 +154,13 @@ func (s *ShadowTLS) copyUntilHandshakeFinishedV2(dst net.Conn, src io.Reader, ha
 				data.Release()
 				return nil, err
 			}
+			println("data: " + hex.EncodeToString(data.Bytes()))
 			if hash.HasContent() {
 				hashCode := hash.Sum()
-				if length >= 8 && (bytes.Equal(data.To(8), hashCode) || lastHash != nil && bytes.Equal(data.To(8), lastHash)) {
+				if length >= 8 && (bytes.Equal(data.To(8), hashCode) || hash.LastSum() != nil && bytes.Equal(data.To(8), hash.LastSum())) {
 					data.Advance(8)
 					return data, nil
 				}
-				lastHash = hashCode
 			}
 			_, err = io.Copy(dst, io.MultiReader(bytes.NewReader(tlsHdr[:]), data))
 			data.Release()
